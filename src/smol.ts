@@ -3,35 +3,13 @@ import http, { IncomingMessage } from 'node:http'
 import path from 'node:path'
 import fs from 'node:fs/promises'
 import type { ErrorResponse } from '../types/error-types.ts'
-import type { SmolApp } from '../types/server-types.ts'
+import type { Middleware, SmolApp } from '../types/server-types.ts'
 import { ServerResponse } from 'node:http'
 import { getContentType, isValidMethod } from './utils.ts'
 
-async function serveStaticFile(pathname: string, res: ServerResponse) {
-    try {
-        const filePath = pathname.substring(1) // cut leading slash
-        const stats = await fs.stat(filePath)
-
-        if (stats.isFile()) {
-            const fileHandle = await fs.open(filePath, 'r')
-            const readStream = fileHandle.createReadStream()
-
-            readStream.on('error', err => {
-                console.log(`Error streaming file: ${err}`)
-                res.sendJson(500, errorResponse({ status: 500, message: 'Server error' }))
-            })
-
-            readStream.pipe(res)
-
-            return true
-        }
-    } catch (err) {
-        return false
-    }
-}
-
 export function smol() {
     const app = {} as SmolApp
+    app.middleware = []
 
     app.routes = {
         get: {},
@@ -58,6 +36,11 @@ export function smol() {
         const server = http.createServer((req, res) => handleRequest(req, res, app))
         server.listen(port, cb)
         return server
+    }
+
+    app.use = function (middlewareFn) {
+        app.middleware.push(middlewareFn)
+        return app
     }
 
     return app
@@ -89,7 +72,7 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, app: Smo
                 if (!body) return
                 req.body = body
             }
-            app.routes[method][pathname](req, res)
+            executeMiddlewareChain(req, res, app.middleware, app.routes[method][pathname])
         } else {
             res.sendJson(405, errorResponse({
                 status: 405,
@@ -104,6 +87,52 @@ async function handleRequest(req: IncomingMessage, res: ServerResponse, app: Smo
         if (!(await serveStaticFile(pathname, res))) {
             app.routes.get['/not-found'](req, res)
         }
+    }
+}
+
+// Continuation Passing Style Pattern
+function executeMiddlewareChain(
+    req: IncomingMessage,
+    res: ServerResponse,
+    middlewareChain: Middleware[],
+    finalHandler: (req: IncomingMessage, res: ServerResponse) => void
+) {
+    let currentIndex = 0
+
+    function executeNext() {
+        if (currentIndex >= middlewareChain.length) {
+            // we use return just to "break out"
+            // since finalHandler doen't return anything
+            return finalHandler(req, res)
+        }
+
+        const currentHandler = middlewareChain[currentIndex++]
+        currentHandler(req, res, executeNext)
+    }
+
+    executeNext()
+}
+
+async function serveStaticFile(pathname: string, res: ServerResponse) {
+    try {
+        const filePath = pathname.substring(1) // cut leading slash
+        const stats = await fs.stat(filePath)
+
+        if (stats.isFile()) {
+            const fileHandle = await fs.open(filePath, 'r')
+            const readStream = fileHandle.createReadStream()
+
+            readStream.on('error', err => {
+                console.log(`Error streaming file: ${err}`)
+                res.sendJson(500, errorResponse({ status: 500, message: 'Server error' }))
+            })
+
+            readStream.pipe(res)
+
+            return true
+        }
+    } catch (err) {
+        return false
     }
 }
 
